@@ -41,13 +41,7 @@ cc_binary {
     }) + select(soong_config_variable("OPLUS_LINEAGE_LIVEDISPLAY_HAL", "ENABLE_DM"), {
         "true": ["vendor.lineage.livedisplay-service.oplus-dm.xml"],
         default: [],
-    }) + select(soong_config_variable("OPLUS_LINEAGE_LIVEDISPLAY_HAL", "ENABLE_PA"), {
-        "false": [],
-        default: ["vendor.lineage.livedisplay-service.oplus-pa.xml"],
-    }) + select(soong_config_variable("OPLUS_LINEAGE_LIVEDISPLAY_HAL", "ENABLE_SE"), {
-        "false": [],
-        default: ["vendor.lineage.livedisplay-service.oplus-se.xml"],
-    }),
+    }),  // [xi-audiofix] PA/SE vintf 声明移除：livedisplay 服务起不来时，finishBooting 的 waitForDeclaredService 会永久阻塞（Watchdog 65s 杀 system_server）
     relative_install_path: "hw",
     srcs: [
         ":vendor.lineage.livedisplay-sdm-pa",
