@@ -7,6 +7,8 @@
 
 #include <aidl/android/hardware/biometrics/fingerprint/SensorProps.h>
 
+#include <android/binder_status.h>
+
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
@@ -121,14 +123,39 @@ SensorProps SensorPropsInit(SensorProps props) {
 }
 }  // anonymous namespace
 
-extern "C" void
+extern "C" binder_status_t
 _ZNK4aidl7android8hardware10biometrics11fingerprint11SensorProps13writeToParcelEP7AParcel(
         SensorProps* thisptr, AParcel* parcel) {
-    static auto props = SensorPropsInit(*thisptr);
+
     static auto writeToParcel = reinterpret_cast<
             typeof(_ZNK4aidl7android8hardware10biometrics11fingerprint11SensorProps13writeToParcelEP7AParcel)*>(
             dlsym(RTLD_NEXT, __func__));
 
-    LOG(DEBUG) << "Original props=" << thisptr->toString() << ", new props=" << props.toString();
-    writeToParcel(&props, parcel);
+    if (writeToParcel == nullptr) {
+        LOG(ERROR) << "SHIMFIX: dlsym(RTLD_NEXT) 拿不到原始 writeToParcel，放弃改写";
+        return STATUS_UNKNOWN_ERROR;
+    }
+
+    // ！！绝对不能整体拷贝 thisptr ！！
+    // 实测（2026-10-09，ovaltine / salami 移植 blob）：HAL 传进来的对象里
+    //   commonProps  读得出正常值（sensorId=1 strength=2 maxEnroll=5 componentInfo=2 项）
+    //   sensorLocations 却是未初始化内存（size 读到 1.1e19，0x99 填充）
+    // 整体拷贝会在 vector 拷贝里 __throw_length_error -> 无异常模式下直接 abort，HAL 当场死。
+    // 所以只读已证实安全的 commonProps，其余字段全部按系统属性重算。
+    SensorProps props;
+    props.commonProps = thisptr->commonProps;
+
+    LOG(ERROR) << "SHIMFIX in this=" << static_cast<const void*>(thisptr)
+               << " sensorId=" << props.commonProps.sensorId
+               << " strength=" << static_cast<int>(props.commonProps.sensorStrength)
+               << " maxEnroll=" << props.commonProps.maxEnrollmentsPerUser
+               << " componentInfo.size=" << props.commonProps.componentInfo.size();
+
+    props = SensorPropsInit(props);
+
+    LOG(ERROR) << "SHIMFIX out sensorType=" << static_cast<int>(props.sensorType)
+               << " locs.size=" << props.sensorLocations.size()
+               << " halHandlesDisplayTouches=" << props.halHandlesDisplayTouches;
+
+    return writeToParcel(&props, parcel);
 }
