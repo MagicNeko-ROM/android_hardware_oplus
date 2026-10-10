@@ -7,7 +7,12 @@
 cc_defaults {
     name: "libshims_aidl_fingerprint.oplus_defaults",
     srcs: ["SensorPropsShim.cpp"],
-    shared_libs: ["libbase"],
+    // libbinder_ndk：提供 AStatus_newOk / AStatus_fromExceptionCode 等
+    // —— 追加 getInterfaceHash 覆盖后开始需要它（2026-10-10）
+    shared_libs: [
+        "libbase",
+        "libbinder_ndk",
+    ],
     device_specific: true,
 }
 

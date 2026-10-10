@@ -1,0 +1,7 @@
+service vendor.oplus_als /system/bin/hw/vendor.lineage.oplus_als-service
+    class hal
+    user graphics
+    group graphics
+    ioprio rt 4
+    task_profiles ProcessCapacityHigh
+    # sensors HAL 会 AServiceManager_waitForService 等它，不设 oneshot，崩了要能拉起
