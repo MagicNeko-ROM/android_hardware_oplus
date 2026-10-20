@@ -234,3 +234,4 @@
 /dev/sec_dev                          u:object_r:wlchg_device:s0
 /dev/wlchg                            u:object_r:wlchg_device:s0
 /dev/wls_dev                          u:object_r:wlchg_device:s0
+/(vendor|system/vendor)/bin/hw/android\.hardware\.sensors-service\.oplus-multihal   u:object_r:hal_sensors_default_exec:s0

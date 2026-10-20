@@ -1,0 +1,39 @@
+// vendor.lineage.oplus_als 服务端 —— 向 sensors HAL 提供屏幕区域平均色
+//
+// 【为什么编在 system 侧而不是 vendor 侧】汐 2026-10-10 实测结论：
+//   截图要走 SurfaceFlinger，核心依赖是 libgui。libgui 虽然 vendor_available，
+//   但它的头文件会一路拖出平台侧依赖（实测第一颗雷就是 ui/LogicalDisplayId.h
+//   要 ftl/mixins.h，vendor 变体拿不到）。而 AIDL 接口是 @VintfStability 的，
+//   放在系统侧同样能被 vendor 的 sensors HAL 调 —— 于是全部 VNDK 摩擦消失。
+//   先例：screencap 自己就住在 /system/bin。
+//
+// 【为什么 user 必须是 graphics】SurfaceFlinger 的截图权限检查是
+//   if ((uid != AID_GRAPHICS) && !checkPermission(READ_FRAME_BUFFER, pid, uid)) 拒绝;
+//   跑在 graphics(1021) 上天然免权限，省掉一整套权限授予与 SELinux 例外。
+package {
+    default_applicable_licenses: ["Android-Apache-2.0"],
+}
+
+cc_binary {
+    name: "vendor.lineage.oplus_als-service",
+    relative_install_path: "hw",
+    init_rc: ["als-service.rc"],
+    srcs: [
+        "src/main.cpp",
+        "src/AreaCapture.cpp",
+    ],
+    shared_libs: [
+        "libbase",
+        "liblog",
+        "libutils",
+        "libbinder",
+        "libbinder_ndk",
+        "libgui",
+        "libui",
+        "vendor.lineage.oplus_als-V1-ndk",
+    ],
+    cflags: [
+        "-Wall",
+        "-Werror",
+    ],
+}

@@ -7,6 +7,8 @@
 
 #include <aidl/android/hardware/biometrics/fingerprint/SensorProps.h>
 
+#include <android/binder_status.h>
+
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/parseint.h>
@@ -121,14 +123,121 @@ SensorProps SensorPropsInit(SensorProps props) {
 }
 }  // anonymous namespace
 
-extern "C" void
+extern "C" binder_status_t
 _ZNK4aidl7android8hardware10biometrics11fingerprint11SensorProps13writeToParcelEP7AParcel(
         SensorProps* thisptr, AParcel* parcel) {
-    static auto props = SensorPropsInit(*thisptr);
+
     static auto writeToParcel = reinterpret_cast<
             typeof(_ZNK4aidl7android8hardware10biometrics11fingerprint11SensorProps13writeToParcelEP7AParcel)*>(
             dlsym(RTLD_NEXT, __func__));
 
-    LOG(DEBUG) << "Original props=" << thisptr->toString() << ", new props=" << props.toString();
-    writeToParcel(&props, parcel);
+    if (writeToParcel == nullptr) {
+        LOG(ERROR) << "SHIMFIX: dlsym(RTLD_NEXT) 拿不到原始 writeToParcel，放弃改写";
+        return STATUS_UNKNOWN_ERROR;
+    }
+
+    // ！！绝对不能整体拷贝 thisptr ！！
+    // 实测（2026-10-09，ovaltine / salami 移植 blob）：HAL 传进来的对象里
+    //   commonProps  读得出正常值（sensorId=1 strength=2 maxEnroll=5 componentInfo=2 项）
+    //   sensorLocations 却是未初始化内存（size 读到 1.1e19，0x99 填充）
+    // 整体拷贝会在 vector 拷贝里 __throw_length_error -> 无异常模式下直接 abort，HAL 当场死。
+    // 所以只读已证实安全的 commonProps，其余字段全部按系统属性重算。
+    SensorProps props;
+    props.commonProps = thisptr->commonProps;
+
+    LOG(ERROR) << "SHIMFIX in this=" << static_cast<const void*>(thisptr)
+               << " sensorId=" << props.commonProps.sensorId
+               << " strength=" << static_cast<int>(props.commonProps.sensorStrength)
+               << " maxEnroll=" << props.commonProps.maxEnrollmentsPerUser
+               << " componentInfo.size=" << props.commonProps.componentInfo.size();
+
+    props = SensorPropsInit(props);
+
+    LOG(ERROR) << "SHIMFIX out sensorType=" << static_cast<int>(props.sensorType)
+               << " locs.size=" << props.sensorLocations.size()
+               << " halHandlesDisplayTouches=" << props.halHandlesDisplayTouches;
+
+    return writeToParcel(&props, parcel);
+}
+
+// ============================================================================
+// 汐 2026-10-10：第三处 ABI 错配 —— BnSession::getInterfaceVersion
+//
+// 铁证（反汇编 /vendor/lib64/android.hardware.biometrics.fingerprint-V2-ndk.so）：
+//   BnSession::getInterfaceVersion 只有两条指令：
+//       mov  w8, #0x2      <- 写死返回 2
+//       str  w8, [x1]
+//   它报 2，是因为这个 lib 是按 AIDL V2 生成的。
+//
+// 但 OPlus 的 HAL 实现里**只有 V1 那套方法**（enroll / authenticate / detectInteraction），
+// V2 新加的 *WithContext 系列它没覆盖，全部落到 ISessionDefault 的兜底实现，
+// 而兜底实现返回 EX_UNSUPPORTED_OPERATION。
+//
+// 后果链（已实测）：
+//   HAL 报 V2
+//     -> AidlSession.hasContextMethods() = (mHalInterfaceVersion >= 2) = true
+//     -> FingerprintEnrollClient 调 session.enrollWithContext(...)   [V2 方法]
+//     -> HAL 兜底返回 EX_UNSUPPORTED_OPERATION
+//     -> ISession$Stub$Proxy 抛 UnsupportedOperationException
+//     -> FingerprintEnrollClient.doEnroll 只 catch RemoteException，接不住
+//     -> system_server 崩、系统重启
+//
+// 修法：把它摁回 1。框架于是走 V1 的 enroll() —— 那是 HAL 真的实现了的。
+::ndk::ScopedAStatus ShimGetInterfaceVersion(void* /*thisptr*/, int32_t* out)
+        asm("_ZN4aidl7android8hardware10biometrics11fingerprint9BnSession19getInterfaceVersionEPi");
+
+::ndk::ScopedAStatus ShimGetInterfaceVersion(void* /*thisptr*/, int32_t* out) {
+    if (out == nullptr) {
+        LOG(ERROR) << "SHIMFIX getInterfaceVersion: out == NULL";
+        return ::ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
+    }
+    LOG(ERROR) << "SHIMFIX getInterfaceVersion -> 1（本 HAL 只实现 V1 方法集）";
+    *out = 1;
+    return ::ndk::ScopedAStatus::ok();
+}
+
+// 汐 2026-10-10：补第二处 ABI 错配 —— BnSession::getInterfaceHash
+// ----------------------------------------------------------------------------
+// 症状：录入指纹时指纹 HAL 段错误（tombstone_10）：
+//     signal 11, fault addr 0x0 (write)
+//     __memcpy <- std::string::__assign_no_alias <- BnSession::getInterfaceHash(std::string*)+120
+//     崩溃库: /vendor/lib64/android.hardware.biometrics.fingerprint-V2-ndk.so
+//
+// 反汇编判定（2026-10-10，llvm-objdump on the device's prebuilt）：
+//   函数本身用的是标准 NDK 约定（返回值走 x8 槽、out 走 x1），代码没问题；
+//   是调用方 ISession_onTransact 把 0 放进了 x1。
+//   ⇒ 同一个库里两半生成代码的虚表/约定对不上（OPlus 按旧 binder-ndk 编的 VNDK 预编译件
+//     撞上 AOSP 16 框架）。
+//
+// 处置：像覆盖 writeToParcel 那样，把这个符号也接管掉 ——
+//   out 有效 → 写入正确的 ISession v2 接口哈希；
+//   out 为 NULL（正是崩溃那种情况）→ 不写，返回「不支持」，让框架自行降级走版本号。
+//   关键是【绝不往 NULL 写】。
+//
+// 哈希来源：hardware/interfaces/biometrics/fingerprint/aidl/
+//              aidl_api/android.hardware.biometrics.fingerprint/2/.hash
+//   并已与设备上预编译件 .rodata 里的串（c2f3b863b6dff925bc4451473ee6caa1）对上。
+// ============================================================================
+namespace {
+constexpr char kISessionV2InterfaceHash[] = "c2f3b863b6dff925bc4451473ee6caa1aa304b8f";
+}  // anonymous namespace
+
+// 用 asm() 标签给符号改名：既保留 C++ 语义（ScopedAStatus 是类，不能用 extern "C"），
+// 又让导出的 mangled name 正好是 BnSession::getInterfaceHash，从而抢在预编译件前面。
+::ndk::ScopedAStatus ShimGetInterfaceHash(void* /*thisptr*/, std::string* out)
+        asm("_ZN4aidl7android8hardware10biometrics11fingerprint9BnSession16getInterfaceHash"
+            "EPNSt3__112basic_stringIcNS5_11char_traitsIcEENS5_9allocatorIcEEEE");
+
+::ndk::ScopedAStatus ShimGetInterfaceHash(void* /*thisptr*/, std::string* /*out*/) {
+    // 2026-10-10 修复：无条件返回异常，绝不碰 out。
+    // 铁证（tombstone，崩在录入指纹时）：
+    //   #00 std::string::__assign_external+204      (write to 0x0)
+    //   #01 BnSession::getInterfaceHash(std::string*)+32   <- 本函数
+    //   #02 _ISession_onTransact+2428                      <- OPlus prebuilt 里的旧生成代码
+    // 崩因不是 out==nullptr，而是 out 指向的 std::string 从未被构造
+    // （libc++ 合法空串的 __data_ 指向自身短串缓冲，绝不会是 NULL）。
+    // OPlus 那份 onTransact 与我们的 BnSession ABI 对不上，把一块未构造内存当 string 传了进来。
+    // => 本符号只需存在（满足链接），行为必须是「立刻抛异常、不写任何参数」。
+    LOG(ERROR) << "SHIMFIX getInterfaceHash: 无条件不写 out（ABI 错配，写了必崩）";
+    return ::ndk::ScopedAStatus::fromExceptionCode(EX_UNSUPPORTED_OPERATION);
 }
