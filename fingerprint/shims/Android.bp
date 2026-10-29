@@ -7,7 +7,13 @@
 cc_defaults {
     name: "libshims_aidl_fingerprint.oplus_defaults",
     srcs: ["SensorPropsShim.cpp"],
-    shared_libs: ["libbase"],
+    shared_libs: [
+        "libbase",
+        "libbinder_ndk",
+    ],
+    // the interface-version overrides keep a C symbol name but return
+    // ndk::ScopedAStatus by value (struct return via x8)
+    cflags: ["-Wno-return-type-c-linkage"],
     device_specific: true,
 }
 
@@ -20,6 +26,8 @@ cc_library_shared {
 cc_library_shared {
     name: "libshims_aidl_fingerprint_v2.oplus",
     defaults: ["libshims_aidl_fingerprint.oplus_defaults"],
+    // 必须留在 V2：HAL 是 V2，soong 不接受同进程混用 V2/V4。
+    // 与 framework 的 current 布局差异在 shim 里手工补齐。
     static_libs: ["android.hardware.biometrics.fingerprint-V2-ndk"],
 }
 
